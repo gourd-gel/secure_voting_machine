@@ -1,0 +1,10 @@
+FICTIONAL classroom registry: these are not real government identities.
+Enter all four fields exactly as shown. Email is optional.
+PIN and OTP are simulated text messages in virtual_sms/<phone>.txt.
+The MINOR record must be rejected, even if you enter a false adult DOB.
+
+# voter ID|full name|DOB|phone number
+DEMO-NY-001|Afia Demo|2000-01-02|+15551234567
+DEMO-NY-002|Sam Student|1999-06-15|+15551234568
+SMOKE-NID|Terminal Voter|2000-01-02|+15550000003
+DEMO-NY-MINOR|Young Demo|2020-01-02|+15551234569

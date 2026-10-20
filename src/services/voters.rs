@@ -8,7 +8,11 @@ use crate::{
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Require the owning administrator and an enrollable election state.
-fn enrollment_allowed(conn: &Connection, session: &Session, election: i64) -> AppResult<()> {
+pub(crate) fn enrollment_allowed(
+    conn: &Connection,
+    session: &Session,
+    election: i64,
+) -> AppResult<()> {
     require_role(conn, session, Role::Admin)?;
     let yes:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM elections WHERE election_id=?1 AND created_by=?2 AND status IN ('draft','open'))",params![election,session.user_id()],|r|r.get(0))?;
     if !yes {
@@ -46,14 +50,6 @@ pub fn register(
         "INSERT INTO election_voters(election_id,user_id) VALUES (?1,?2)",
         params![election, id],
     )?;
-    // audit(
-    //     &tx,
-    //     Some(election),
-    //     Some(session.user_id()),
-    //     Some(id),
-    //     "voter_registered",
-    //     0,
-    // )?;
     audit(
         &tx,
         Some(election),
@@ -69,6 +65,12 @@ pub fn register(
     )?;
     crate::security::check_deadline()?;
     tx.commit()?;
+    super::trace_audit(
+        "voter_registered",
+        Some(session.user_id()),
+        Some(election),
+        0,
+    );
     Ok(id)
 }
 /// Return records visible to the authenticated role and ownership scope.
@@ -106,7 +108,6 @@ pub fn enroll(conn: &mut Connection, session: &Session, election: i64, nid: &str
         "INSERT INTO election_voters(election_id,user_id) VALUES (?1,?2)",
         params![election, id],
     )?;
-    //finish_change(tx, session, election, Some(id), "voter_enrolled")
     finish_change(tx, session, election, None, "voter_enrolled")
 }
 /// Removes eligibility, not historical identity or credentials.
@@ -133,7 +134,6 @@ pub fn remove(
     {
         return Err("Voter not enrolled or already voted.".into());
     }
-    //finish_change(tx, session, election, Some(voter), "voter_unenrolled")
     finish_change(tx, session, election, None, "voter_unenrolled")
 }
 /// Update allowed voter profile fields; forbid ordinary OTP-phone/NID reassignment.
@@ -164,7 +164,6 @@ pub fn update(
         "UPDATE users SET email=NULLIF(?1,''),full_name=?2,dob=?3 WHERE id=?4 AND role='voter'",
         params![input.email, input.full_name, input.dob, voter],
     )?;
-    //finish_change(tx, session, election, Some(voter), "voter_updated")
     finish_change(tx, session, election, None, "voter_updated")
 }
 /// Called only from the explicit engineer setup mode, never an ordinary role menu.
@@ -198,4 +197,35 @@ pub fn provision(
     crate::security::check_deadline()?;
     tx.commit()?;
     Ok(())
+}
+
+/// Record only the administrator's delivery confirmation, never the PIN or voter ID.
+pub fn pin_receipt(
+    conn: &Connection,
+    session: &Session,
+    election: i64,
+    voter: i64,
+    received: bool,
+) -> AppResult<()> {
+    enrollment_allowed(conn, session, election)?;
+    let enrolled: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM election_voters WHERE election_id=?1 AND user_id=?2)",
+        rusqlite::params![election, voter],
+        |r| r.get(0),
+    )?;
+    if !enrolled {
+        return Err("Voter is not enrolled in this election.".into());
+    }
+    audit(
+        conn,
+        Some(election),
+        Some(session.user_id()),
+        None,
+        if received {
+            "pin_receipt_confirmed"
+        } else {
+            "pin_receipt_not_confirmed"
+        },
+        if received { 0 } else { 2 },
+    )
 }

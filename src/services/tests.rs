@@ -162,7 +162,7 @@ fn lifecycle_tally_party_totals_and_announcement() {
     election::close(&mut f.conn, &f.official, e).unwrap();
     assert!(election::cast(&mut f.conn, &s, e, &c).is_err());
     election::tally(&mut f.conn, &f.official, e).unwrap();
-    election::tally(&mut f.conn, &f.official, e).unwrap();
+    assert!(election::tally(&mut f.conn, &f.official, e).is_err());
     let results = election::results(&f.conn, &f.official, e).unwrap();
     assert_eq!(results.len(), 6);
     assert_eq!(results.iter().filter(|r| r.votes == 2).count(), 3);
@@ -295,7 +295,17 @@ fn failed_password_and_otp_attempts_lock_and_log() {
         .auth
         .password_login(&f.conn, "admin@example.test", "password1234", Role::Admin)
         .is_err());
-    assert!(count(&f.conn, "audit_events") >= 10);
+    for (event, severity, expected) in [
+        ("password_failed", 3, 5),
+        ("otp_failed", 3, 3),
+        ("authentication_locked", 3, 2),
+        ("authentication_blocked", 3, 1),
+    ] {
+        let n:i64=f.conn.query_row("SELECT count(*) FROM audit_events WHERE event_type=?1 AND actor_user_id=1 AND severity=?2",params![event,severity],|r|r.get(0)).unwrap();
+        assert_eq!(n, expected, "{event}");
+    }
+    let anonymous:i64=f.conn.query_row("SELECT count(*) FROM audit_events WHERE event_type='authentication_blocked' AND actor_user_id IS NULL AND severity=3",[],|r|r.get(0)).unwrap();
+    assert_eq!(anonymous, 1); // Password cooldown is checked before account lookup.
 }
 
 #[test]
@@ -574,5 +584,192 @@ fn inbox_uses_phone_filename_and_rejects_paths() {
     assert!(f.root.join("engineer.txt").exists());
     for invalid in ["../escape", "/tmp/escape", "..\\escape", "", "123/4567890"] {
         assert!(f.auth.deliver(invalid, "must not write").is_err());
+    }
+}
+
+#[test]
+fn lifecycle_rejections_and_private_atomic_vote_receipt() {
+    let mut f = Fixture::new();
+    let e = f.create();
+    let (v, _) = f.register(e, 1);
+    assert!(election::close(&mut f.conn, &f.official, e).is_err());
+    election::start(&mut f.conn, &f.official, e).unwrap();
+    assert!(election::start(&mut f.conn, &f.official, e).is_err());
+    assert!(election::tally(&mut f.conn, &f.official, e).is_err());
+    let c = choices(&f.conn, &f.official, e, 0);
+    let voter = Session::for_test(v, Role::Voter);
+    let receipts = |conn: &rusqlite::Connection| -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM notification_outbox WHERE message='thank you for your vote!'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(election::cast(&mut f.conn, &voter, e, &c[..1]).is_err());
+    assert_eq!(receipts(&f.conn), 0);
+    let events = count(&f.conn, "audit_events");
+    election::cast(&mut f.conn, &voter, e, &c).unwrap();
+    assert_eq!(count(&f.conn, "audit_events"), events);
+    assert_eq!(receipts(&f.conn), 1);
+    assert_eq!(
+        election::cast(&mut f.conn, &voter, e, &c)
+            .unwrap_err()
+            .to_string(),
+        "you already voted bruh"
+    );
+    assert_eq!(count(&f.conn, "audit_events"), events);
+    assert_eq!(receipts(&f.conn), 1);
+    election::close(&mut f.conn, &f.official, e).unwrap();
+    assert!(election::start(&mut f.conn, &f.official, e).is_err());
+    assert!(election::close(&mut f.conn, &f.official, e).is_err());
+    election::tally(&mut f.conn, &f.official, e).unwrap();
+    assert!(election::start(&mut f.conn, &f.official, e).is_err());
+}
+
+#[test]
+fn final_results_and_timestamps_survive_repeated_tally_and_sql_tampering() {
+    let mut f = Fixture::new();
+    let e = f.create();
+    let (v, _) = f.register(e, 1);
+    let c = choices(&f.conn, &f.admin, e, 0);
+    election::start(&mut f.conn, &f.official, e).unwrap();
+    election::cast(&mut f.conn, &Session::for_test(v, Role::Voter), e, &c).unwrap();
+    election::close(&mut f.conn, &f.official, e).unwrap();
+    election::tally(&mut f.conn, &f.official, e).unwrap();
+    election::announce(&mut f.conn, &f.official, e).unwrap();
+    let snapshot = |conn: &Connection| -> (String, String, i64) {
+        conn.query_row("SELECT tallied_at,announced_at,(SELECT sum(votes) FROM candidate_results) FROM elections WHERE election_id=?1", [e], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap()
+    };
+    let before = snapshot(&f.conn);
+    for _ in 0..3 {
+        assert!(election::tally(&mut f.conn, &f.official, e).is_err());
+        assert!(election::announce(&mut f.conn, &f.official, e).is_err());
+    }
+    for sql in [
+        "UPDATE candidate_results SET votes=999",
+        "DELETE FROM candidate_results",
+        "UPDATE party_results SET votes=999",
+        "DELETE FROM party_results",
+        "UPDATE elections SET tallied_at='forged'",
+        "UPDATE elections SET announced_at=NULL",
+        "INSERT OR REPLACE INTO candidate_results SELECT * FROM candidate_results",
+    ] {
+        assert!(f.conn.execute(sql, []).is_err(), "{sql}");
+    }
+    assert_eq!(snapshot(&f.conn), before);
+    for (event, expected, severity) in [
+        ("election_tallied", 1, 0),
+        ("results_announced", 1, 0),
+        ("tally_rejected", 3, 2),
+        ("announcement_rejected", 3, 2),
+    ] {
+        let n: i64 = f.conn.query_row("SELECT count(*) FROM audit_events WHERE event_type=?1 AND severity=?2 AND actor_user_id=?3 AND election_id=?4", params![event,severity,f.official.user_id(),e], |r| r.get(0)).unwrap();
+        assert_eq!(n, expected, "{event}");
+    }
+}
+
+#[test]
+fn tally_audit_failure_rolls_back_totals_and_timestamp() {
+    let mut f = Fixture::new();
+    let e = f.create();
+    election::start(&mut f.conn, &f.official, e).unwrap();
+    election::close(&mut f.conn, &f.official, e).unwrap();
+    f.conn.execute_batch("CREATE TRIGGER fail_tally BEFORE INSERT ON audit_events WHEN NEW.event_type='election_tallied' BEGIN SELECT RAISE(ABORT,'test'); END;").unwrap();
+    assert!(election::tally(&mut f.conn, &f.official, e).is_err());
+    assert_eq!(count(&f.conn, "candidate_results"), 0);
+    assert_eq!(count(&f.conn, "party_results"), 0);
+    assert_eq!(
+        election::get(&f.conn, &f.official, e).unwrap().status,
+        "closed"
+    );
+    f.conn.execute_batch("DROP TRIGGER fail_tally").unwrap();
+    election::tally(&mut f.conn, &f.official, e).unwrap();
+}
+
+#[test]
+fn voter_events_are_aggregate_only_and_identity_inserts_are_blocked() {
+    let mut f = Fixture::new();
+    let e = f.create();
+    let (v, pin) = f.register(e, 1);
+    let audit_before = count(&f.conn, "audit_events");
+    let security_before = count(&f.conn, "security_events");
+    for event in [
+        "pin_failed",
+        "otp_failed",
+        "otp_expired",
+        "authentication_locked",
+        "authentication_blocked",
+        "client_error",
+        "authorization_denied",
+        "request_rejected",
+        "request_timeout",
+    ] {
+        crate::security::event(&f.conn, Some(v), event, None, 1).unwrap();
+        let n: i64 = f
+            .conn
+            .query_row(
+                "SELECT total FROM voter_security_counts WHERE event_type=?1",
+                [event],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "{event}");
+    }
+    crate::security::event(&f.conn, None, "pin_failed", Some("pin:anonymous-test"), 1).unwrap();
+    let mut pending = Some(f.auth.pin_login(&f.conn, &pin).unwrap());
+    let otp = message(&f.root, &input(1).phone, "Login OTP: ");
+    f.auth.complete_otp(&f.conn, &mut pending, &otp).unwrap();
+    assert_eq!(count(&f.conn, "audit_events"), audit_before);
+    assert_eq!(count(&f.conn, "security_events"), security_before);
+    assert!(super::audit(&f.conn, Some(e), Some(v), None, "client_error", 3).is_err());
+    assert!(f.conn.execute("INSERT INTO audit_events(actor_user_id,event_type,severity) VALUES (?1,'client_error',3)",[v]).is_err());
+    assert!(f
+        .conn
+        .execute(
+            "INSERT INTO security_events(user_id,event_type,attempts) VALUES (?1,'otp_failed',1)",
+            [v]
+        )
+        .is_err());
+    assert!(f.conn.execute("INSERT INTO security_events(event_type,scope,attempts) VALUES ('pin_failed','pin:forged',1)",[]).is_err());
+}
+
+#[test]
+fn receipt_confirmation_is_owned_private_and_audited_for_both_answers() {
+    let mut f = Fixture::new();
+    let e = f.create();
+    let (v, _) = f.register(e, 1);
+    for received in [true, false] {
+        voters::pin_receipt(&f.conn, &f.admin, e, v, received).unwrap();
+    }
+    assert!(voters::pin_receipt(&f.conn, &f.official, e, v, true).is_err());
+    assert!(voters::pin_receipt(&f.conn, &f.admin, e, v + 999, true).is_err());
+    let n:i64 = f.conn.query_row("SELECT count(*) FROM audit_events WHERE event_type LIKE 'pin_receipt_%' AND actor_user_id=1 AND subject_user_id IS NULL",[],|r|r.get(0)).unwrap();
+    assert_eq!(n, 2);
+    election::delete(&mut f.conn, &f.admin, e).unwrap();
+    assert_eq!(election::audit_list(&f.conn, &f.admin).unwrap()[0].id, e);
+    assert!(election::audit_list(&f.conn, &f.official).is_err());
+}
+
+#[test]
+fn incident_audits_are_owner_scoped_and_append_only() {
+    let mut f = Fixture::new();
+    let e = f.create();
+    election::flag_incident(&f.conn, &f.admin, e).unwrap();
+    let log = election::audit_log(&f.conn, &f.admin, e)
+        .unwrap()
+        .join("\n");
+    assert!(log.contains("unidentified_change_reported") && log.contains("level 2"));
+    assert!(election::flag_incident(&f.conn, &f.official, e).is_err());
+    assert!(election::audit_log(&f.conn, &Session::for_test(999, Role::Admin), e).is_err());
+    for sql in [
+        "UPDATE audit_events SET severity=0",
+        "DELETE FROM audit_events",
+        "UPDATE security_events SET attempts=0",
+        "DELETE FROM security_events",
+    ] {
+        // Ensure the security table has a row, so its trigger is exercised.
+        crate::security::event(&f.conn, Some(1), "password_failed", None, 1).unwrap();
+        assert!(f.conn.execute(sql, []).is_err(), "{sql}");
     }
 }

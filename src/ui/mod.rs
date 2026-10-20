@@ -74,6 +74,7 @@ enum FormPurpose {
     EditCandidate(i64),
     LinkCandidate(i64),
     RegisterVoter,
+    PinReceipt(i64),
     UpdateVoter(i64),
     Enroll,
     Setup,
@@ -263,7 +264,11 @@ impl App {
     }
     /// Fetch allowed elections and open the appropriate selection screen.
     fn load_elections(&mut self, purpose: SelectionPurpose) -> AppResult<()> {
-        self.elections = election::list(&self.conn, self.session()?)?;
+        self.elections = if matches!(purpose, SelectionPurpose::Audit) {
+            election::audit_list(&self.conn, self.session()?)?
+        } else {
+            election::list(&self.conn, self.session()?)?
+        };
         self.selection_purpose = purpose;
         self.selected = 0;
         self.screen = Screen::Elections;

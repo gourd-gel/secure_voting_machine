@@ -12,14 +12,6 @@ pub(crate) fn require_role(conn: &Connection, session: &Session, role: Role) -> 
         |r| r.get(0),
     )?;
     if !valid || session.role() != role {
-        // audit(
-        //     conn,
-        //     None,
-        //     Some(session.user_id()),
-        //     None,
-        //     "authorization_denied",
-        //     3,
-        // )?;
         if session.role() == Role::Voter {
             crate::security::voter_metric(conn, "authorization_denied")?;
         } else {
@@ -60,6 +52,9 @@ pub(crate) fn audit(
     }
     conn.execute("INSERT INTO audit_events(election_id,actor_user_id,subject_user_id,event_type,severity) VALUES (?1,?2,?3,?4,?5)",
         params![election,actor,subject,event,severity])?;
+    if conn.is_autocommit() {
+        trace_audit(event, actor, election, severity);
+    }
     Ok(())
 }
 pub(crate) use crate::validation::text;
@@ -69,25 +64,6 @@ mod tests;
 
 /// Record a successful election change and commit only while its deadline is valid.
 /// Taking ownership of the transaction ensures errors roll back both data and audit.
-// fn finish_change(
-//     tx: Transaction<'_>,
-//     session: &Session,
-//     election: i64,
-//     subject: Option<i64>,
-//     event: &str,
-// ) -> AppResult<()> {
-//     audit(
-//         &tx,
-//         Some(election),
-//         Some(session.user_id()),
-//         subject,
-//         event,
-//         0,
-//     )?;
-//     crate::security::check_deadline()?;
-//     tx.commit()?;
-//     Ok(())
-// }
 fn finish_change(
     tx: Transaction<'_>,
     session: &Session,
@@ -102,15 +78,16 @@ fn finish_change(
     crate::security::check_deadline()?;
     tx.commit()?;
 
-    // Only report actions after a successful commit.
-    tracing::info!(
-        target: "security",
-        event_type = event,
-        actor_user_id = actor,
-        election_id = election,
-        outcome = "success",
-        "Administrative operation committed"
-    );
+    trace_audit(event, Some(actor), Some(election), 0);
 
     Ok(())
+}
+
+/// Emit only allowlisted fields, after the database transaction has committed.
+pub(crate) fn trace_audit(event: &str, actor: Option<i64>, election: Option<i64>, severity: i64) {
+    if severity > 0 {
+        tracing::warn!(target: "security", event_type=event, actor_user_id=actor, election_id=election, severity, "Security event committed");
+    } else {
+        tracing::info!(target: "security", event_type=event, actor_user_id=actor, election_id=election, severity, "Administrative operation committed");
+    }
 }

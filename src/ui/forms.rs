@@ -92,7 +92,7 @@ impl App {
                 }
             }
             FormPurpose::RegisterVoter | FormPurpose::UpdateVoter(_) => {
-                check::voter(&VoterInput {
+                check::voter_fields(&VoterInput {
                     full_name: v[0].into(),
                     dob: v[1].into(),
                     nid: v[2].into(),
@@ -199,9 +199,35 @@ impl App {
                             if let FormPurpose::UpdateVoter(user) = form.purpose {
                                 voters::update(&mut self.conn, session, id, user, &input)?;
                             } else {
-                                voters::register(&mut self.conn, &self.auth, session, id, &input)?;
+                                let voter = voters::register(
+                                    &mut self.conn,
+                                    &self.auth,
+                                    session,
+                                    id,
+                                    &input,
+                                )?;
+                                self.load_voters()?;
+                                self.form(
+                                    FormPurpose::PinReceipt(voter),
+                                    "Did voter receive PIN?",
+                                    vec![("yes / no", String::new(), false)],
+                                );
+                                self.notice =
+                                    "PIN sent privately to the voter's phone-number text file."
+                                        .into();
+                                return Ok(());
                             }
                             self.load_voters()?;
+                        }
+                        FormPurpose::PinReceipt(voter) => {
+                            let received = match v[0].trim().to_lowercase().as_str() {
+                                "yes" => true,
+                                "no" => false,
+                                _ => return Err("Please enter yes or no.".into()),
+                            };
+                            voters::pin_receipt(&self.conn, session, id, voter, received)?;
+                            self.notice = if received { "PIN receipt confirmed." } else { "PIN not received. Check the registered phone's inbox; registration remains saved." }.into();
+                            return Ok(());
                         }
                         FormPurpose::Enroll => {
                             voters::enroll(&mut self.conn, session, id, v[0])?;
@@ -251,10 +277,9 @@ impl App {
                     .map(|(p, c)| Ok((p.id, c.ok_or("Incomplete ballot")?)))
                     .collect::<AppResult<Vec<_>>>()?;
                 election::cast(&mut self.conn, session, id, &choices)?;
-                self.voting_choices.clear();
-                self.load_elections(SelectionPurpose::Vote)?;
+                self.logout();
                 self.notice =
-                    "Your ballot was recorded. You cannot vote again in this election.".into();
+                    "thank you for your vote! Signed out. Check your SMS text file.".into();
                 return Ok(());
             }
         }

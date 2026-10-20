@@ -15,6 +15,10 @@ pub(super) fn service_call(
             let (): () = from_value(args)?;
             Ok(to_value(election::list(conn, session)?)?)
         }
+        "election.audit_list" => {
+            let (): () = from_value(args)?;
+            Ok(to_value(election::audit_list(conn, session)?)?)
+        }
         "election.get" => {
             let (id,): (i64,) = from_value(args)?;
             Ok(to_value(election::get(conn, session, id)?)?)
@@ -87,6 +91,13 @@ pub(super) fn service_call(
         }
         "election.cast" => {
             let (election, choices): (i64, Vec<(i64, i64)>) = from_value(args)?;
+            services::require_role(conn, session, Role::Voter)?;
+            let (nid, name, dob, phone): (String, String, String, String) = conn.query_row(
+                "SELECT nid,full_name,dob,phone_number FROM users WHERE id=?1",
+                [session.user_id()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            state.registry.verify(&nid, &name, &dob, &phone)?;
             Ok(to_value(election::cast(
                 conn, session, election, &choices,
             )?)?)
@@ -117,6 +128,9 @@ pub(super) fn service_call(
         }
         "voters.register" => {
             let (election, input): (i64, VoterInput) = from_value(args)?;
+            let input = state
+                .registry
+                .registration(conn, session, election, &input)?;
             Ok(to_value(voters::register(
                 conn,
                 &state.auth,
@@ -125,12 +139,25 @@ pub(super) fn service_call(
                 &input,
             )?)?)
         }
+        "voters.pin_receipt" => {
+            let (election, voter, received): (i64, i64, bool) = from_value(args)?;
+            Ok(to_value(voters::pin_receipt(
+                conn, session, election, voter, received,
+            )?)?)
+        }
         "voters.list" => {
             let (election,): (i64,) = from_value(args)?;
             Ok(to_value(voters::list(conn, session, election)?)?)
         }
         "voters.enroll" => {
             let (election, nid): (i64, String) = from_value(args)?;
+            services::require_role(conn, session, Role::Admin)?;
+            let (name, dob, phone): (String, String, String) = conn.query_row(
+                "SELECT full_name,dob,phone_number FROM users WHERE nid=?1",
+                [&nid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            state.registry.verify(&nid, &name, &dob, &phone)?;
             Ok(to_value(voters::enroll(conn, session, election, &nid)?)?)
         }
         "voters.remove" => {
@@ -139,6 +166,9 @@ pub(super) fn service_call(
         }
         "voters.update" => {
             let (election, voter, input): (i64, i64, VoterInput) = from_value(args)?;
+            let input = state
+                .registry
+                .registration(conn, session, election, &input)?;
             Ok(to_value(voters::update(
                 conn, session, election, voter, &input,
             )?)?)

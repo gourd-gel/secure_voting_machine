@@ -11,6 +11,7 @@ pub(super) struct SessionRecord {
 }
 pub(super) struct State {
     pub(super) conn: Connection,
+    pub(super) registry: registry::Registry,
     pub(super) auth: auth::login::Auth,
     pub(super) pending: HashMap<String, LoginRecord>,
     pub(super) sessions: HashMap<String, SessionRecord>,
@@ -124,27 +125,6 @@ impl State {
             services::require_role(&self.conn, &record.session, peer_role)?;
             match request.operation.as_str() {
                 "logout" => Ok(Value::Null),
-                // "error" => {
-                //     let (screen, message): (String, String) = serde_json::from_value(request.args)?;
-                //     let _ = screen;
-                //     let screen = "terminal-client";
-                //     // No form values, PINs, tokens or ballot selections are logged.
-                //     let _ = message; // Never store arbitrary client-supplied log text.
-                //     let message = "Client reported an operation failure";
-                //     self.conn.execute(
-                //         "INSERT INTO error_reports(actor_user_id,screen,message) VALUES (?1,?2,?3)",
-                //         rusqlite::params![record.session.user_id(), screen, message],
-                //     )?;
-                //     services::audit(
-                //         &self.conn,
-                //         None,
-                //         Some(record.session.user_id()),
-                //         None,
-                //         "client_error",
-                //         3,
-                //     )?;
-                //     Ok(Value::Null)
-                // }
                 "error" => {
                     let (_screen, _message): (String, String) =
                         serde_json::from_value(request.args)?;

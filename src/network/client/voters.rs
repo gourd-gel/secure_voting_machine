@@ -34,3 +34,14 @@ pub fn update(
 ) -> AppResult<()> {
     conn.call(session, "voters.update", (election, voter, input))
 }
+
+/// Confirm delivery without returning the credential to the administrator.
+pub fn pin_receipt(
+    conn: &ApiClient,
+    session: &Session,
+    election: i64,
+    voter: i64,
+    received: bool,
+) -> AppResult<()> {
+    conn.call(session, "voters.pin_receipt", (election, voter, received))
+}

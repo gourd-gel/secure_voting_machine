@@ -2,29 +2,6 @@
 use super::*;
 
 /// Render a titled selectable list.
-// fn draw_list(
-//     frame: &mut Frame,
-//     area: Rect,
-//     title: &str,
-//     items: Vec<String>,
-//     selected: usize,
-//     help: &str,
-// ) {
-//     let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(area);
-//     let mut state = ListState::default();
-//     if !items.is_empty() {
-//         state.select(Some(selected.min(items.len() - 1)));
-//     }
-//     frame.render_stateful_widget(
-//         List::new(items)
-//             .block(Block::bordered().title(title))
-//             .highlight_style(HIGHLIGHT)
-//             .highlight_symbol("> "),
-//         sections[0],
-//         &mut state,
-//     );
-//     frame.render_widget(Paragraph::new(help).wrap(Wrap { trim: true }), sections[1]);
-// }
 fn draw_list(
     frame: &mut Frame,
     area: Rect,

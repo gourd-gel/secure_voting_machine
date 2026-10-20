@@ -1,6 +1,6 @@
 # Secure Voting Machine 🗳️
 
-**Democracy, but make it terminal.** Course demo edition — v0.2.2.
+**Democracy, but make it terminal.** Course demo edition — v0.2.5.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -12,7 +12,7 @@ Create elections, register voters, cast immutable ballots, and announce results.
 Administrator and District Official accounts use password + OTP login; voters use
 PIN + OTP login. All client operations pass through encrypted role endpoints.
 
-> **Classroom project:** OTP delivery uses a local virtual inbox. Network services
+> OTP delivery uses a local virtual inbox. Network services
 > bind to localhost. See [Security scope](docs/SECURITY.md) for the trust boundaries.
 
 [Installation](#installation) · [Staff signup](#sign-up-administrators-and-district-officials) ·
@@ -25,13 +25,11 @@ Start with installation below, then `--signup` for staff accounts. The admin men
 has four tasks: create, edit, register a voter, and read the audit log. Work through
 [the screenshot checklist](docs/USE_CASES.md) when rehearsing the demo.
 
-This version keeps ordinary functions and explicit endpoint matches. Shared
-transaction finishing and JSON serialization replace repeated boilerplate. There
-are **4,346 lines in non-test Rust files**, down from 4,665; separate Rust test files
-contain 1,584 lines. These are physical lines, including comments/blank lines and
-small embedded test helpers. `Cargo.lock` is generated dependency metadata, not application code.
-Total Rust source is 5,930 lines, down from 6,207 despite adding a regression test.
-No security mechanism or dependency was removed to shrink the count.
+Read [Possible User Journeys](POSSIBLE_USER_JOURNEYS.md) for the complete demo,
+including rejected inputs. Demo voter IDs live in [demo/voter_ids.txt](demo/voter_ids.txt).
+The registry is a separate SQLite database queried through its own mTLS endpoint;
+it is a classroom stand-in, not an actual government connection. No new crates were
+added for the eligibility and journey update. `Cargo.lock` is dependency metadata.
 
 ## Features
 
@@ -40,7 +38,7 @@ No security mechanism or dependency was removed to shrink the count.
 - One final ballot per enrolled voter, with one candidate per position.
 - Password/PIN verification followed by expiring, single-use OTPs.
 - TLS 1.3 client connections and mutual TLS between gateways and the database service.
-- Lifecycle and participation audit logs, without exposing voter choices to administrators.
+- Lifecycle and voter-registration audit logs, without exposing voter choices to administrators.
 - Candidate and party tallies, including ties and zero-vote results.
 
 ## Installation
@@ -111,11 +109,6 @@ If using a GitHub checkout, open the repository directory containing `Cargo.toml
 
 ### 3. Build
 
-> v0.2.2 verification note: this environment could not resolve the existing
-> `num-traits 0.2.29` lockfile entry from the fresh registry. Tests used retained
-> compiled dependencies. A clean Cargo build needs that dependency-resolution
-> issue addressed; see `docs/TESTING.md`.
-
 
 ```sh
 cargo build --locked
@@ -154,7 +147,7 @@ below. For subsequent ordinary use, start with:
 cargo run --locked
 ```
 
-The default mode starts four local listeners on automatically assigned ports and the
+The default mode starts four voting listeners plus a separate demo-registry listener on automatically assigned ports and the
 terminal client in one process. Every client operation still uses TLS through a role
 gateway, followed by mutual TLS to the database service. No certificate setup or paid
 SMS subscription is required for this mode.
@@ -283,7 +276,7 @@ positions and candidates from the database.
 | District Official | S start; F finish/close; T tally; A announce; R show results |
 | Voter ballot | Up/Down navigate; Space select; S submit; Enter confirm |
 
-Voter registration requires full name, DOB (`YYYY-MM-DD`), NID and phone; email is
+Voter registration requires full name, DOB (`YYYY-MM-DD`, age 18+), a matching demo government voter ID and phone; email is
 optional. NID identifies a person across elections. Use I to enroll that person in
 another election without changing their PIN. There is only one registration action,
 R; N no longer marks or creates a voter.
@@ -296,7 +289,7 @@ all their appearances.
 
 A District Official opens a draft, closes an open election, tallies it and announces
 results. Tallying stores candidate totals and party totals **per position**. Repeating
-a tally cannot add votes twice. Ties and positions with no votes are shown explicitly.
+a tally is rejected; stored results and final timestamps stay unchanged. Ties and positions with no votes are shown explicitly.
 
 A voter sees open elections in which they are enrolled and have not voted. They
 select exactly one candidate per position, then confirm the whole ballot. Submission
@@ -349,7 +342,7 @@ migration notes before explicitly pointing `VOTING_DB` at existing data.
 | No OTP or PIN visible | Run `--inbox` with exactly the registered phone number and the same `VOTING_SMS_DIR` |
 | Email already exists | Sign in to that account or use a distinct email; signup does not overwrite accounts |
 | Screen says to resize | Increase the terminal to at least 60 × 20 |
-| TLS `close_notify` / unexpected EOF during signup | Stop old processes; verify version **0.2.2** using `cargo run --locked -- --version`, then run `cargo run --locked -- --signup` from this source directory. Keep your database and `.env`. See [validation report](docs/TESTING.md). If signup may have committed, try logging in before repeating it |
+| TLS `close_notify` / unexpected EOF during signup | Stop old processes; verify version **0.2.5** using `cargo run --locked -- --version`, then run `cargo run --locked -- --signup` from this source directory. Keep your database and `.env`. See [validation report](docs/TESTING.md). If signup may have committed, try logging in before repeating it |
 | Separate client cannot connect | Start `--serve`; use the same base port and public CA certificate |
 | Port already in use | Set a free `VOTING_PORT`; the following three ports must also be free |
 
@@ -362,7 +355,7 @@ migration notes before explicitly pointing `VOTING_DB` at existing data.
 
 ### If a TLS signup error continues
 
-Version 0.2.2 retains the fix that restores blocking mode on accepted TLS sockets for
+Version 0.2.5 retains the fix that restores blocking mode on accepted TLS sockets for
 macOS/BSD compatibility. It sends TLS shutdown notifications and enforces a ten-second request deadline.
 A response delayed beyond ten seconds is rejected. Real terminal signup uses normal
 bcrypt cost; test-only fixtures use a lower cost to keep unit tests fast.
@@ -374,18 +367,9 @@ cargo run --locked -- --version
 cargo run --locked -- --signup
 ```
 
-The first command must show `secure_voting_machine 0.2.2`. Stop any older server/client
-processes before restarting. Do not remove your database or regenerate its pepper.
-If an error continues, record your OS, exact launch command and the full error text.
-The error now names the gateway/database endpoint and identifies whether failure
-occurred during connection, handshake/request sending, or response receipt. Do not
-include your password, PIN, OTP or `.env` contents in a bug report.
-
-
 ## Security receipts, not vibes
 
-Read [STRIDE.md](STRIDE.md) for threats, controls, evidence and limitations. Start
-with [dummy.md](dummy.md) if the project currently looks like alphabet soup.
+Read [STRIDE.md](STRIDE.md) for threats, controls, evidence and limitations.
 [implementation_details.md](implementation_details.md) lists every Rust function,
 its signature, purpose and module, plus the important data and security contracts.
 
@@ -426,18 +410,6 @@ the challenge and lock that identity for five minutes. Ten wrong guesses against
 same PIN value block that PIN lookup for five minutes, not all voters. These controls
 limit guessing but cannot prevent targeted lockout or every denial-of-service attack.
 
-### Code documentation
-
-Read `implementation_details.md` for the function inventory and `dummy.md` for
-the beginner walkthrough. Rust source comments stay beside their functions.
-Generated HTML documentation is excluded from the project.
-
-To refresh the Markdown inventory after editing code:
-
-```sh
-python3 scripts/generate_docs.py
-```
-
 ### Before the demo
 
 ```sh
@@ -454,3 +426,63 @@ temporary data. See [docs/TESTING.md](docs/TESTING.md) for the exact evidence an
 See [docs/DEMO.md](docs/DEMO.md) for questions 9–14 and an honest contribution worksheet.
 
 all best (all the best) — and keep the PIN out of the audit log.
+
+## Eligibility and vote privacy update
+
+Use the exact name, DOB, phone and voter ID together from `demo/voter_ids.txt`. Unknown IDs
+or mismatched identity are rejected by the backend's registry endpoint. The backend logs and rejects under-18 applicants; final submission rechecks DOB and the registry.
+Age uses New York's calendar date; February 29 birthdays reach the threshold on
+March 1 in a non-leap year. This is a classroom rule, not legal eligibility advice.
+
+Vote events are **not** added to the audit log. Administrators see participation via
+the voter list only; DOs see anonymous totals. Selecting candidates changes local
+state only. Submit commits all choices, participation, and a queued thank-you message
+atomically, then signs the voter out. Retry displays `you already voted bruh`.
+The receipt arrives in the registered phone's text file; delivery failures retry.
+Tally is allowed only from closed, and closed/tallied elections cannot reopen.
+
+## v0.2.5 integration: Jeremy + eligibility/security changes
+
+Jeremy's centered menus, rotating JSON tracing, staff audit attribution and anonymous
+voter failure counters are retained. The integration fixes candidate editing and
+keeps the statewide checks, PIN receipts, final tallies and new rejection events.
+**Admin → View Audit Log** includes owned cancelled elections. It does not expose
+ballot choices, PINs, or voter identities. See [integration notes](docs/INTEGRATION.md).
+
+Use all four fields from the same row in `demo/voter_ids.txt`. The separate
+`demo/statewide_voters.sqlite` database stores voter ID, name, DOB and phone.
+The server opens it read-only; `VOTING_REGISTRY_DB` selects a different database.
+A missing/unreadable database blocks startup; there is no permissive fallback.
+`demo/registry.sql` reproduces the fictional database. Editing the text cheat sheet
+alone does not change the database. No real government or mobile service is connected.
+
+| Voter ID | Full name | DOB | Phone |
+| --- | --- | --- | --- |
+| DEMO-NY-001 | Afia Demo | 2000-01-02 | +15551234567 |
+| DEMO-NY-002 | Sam Student | 1999-06-15 | +15551234568 |
+| SMOKE-NID | Terminal Voter | 2000-01-02 | +15550000003 |
+| DEMO-NY-MINOR | Young Demo | 2020-01-02 | +15551234569 (must be rejected) |
+
+An unknown ID shows: “This user does not have a state-wide identifier to take part
+in this election.” A phone/name/DOB mismatch is rejected. Both the entered DOB and
+the stored DOB must be adult; forging an adult DOB for the minor record fails.
+Underage attempts create `voter_not_eligible_underage` (severity 2), attributed to
+the administrator without the applicant's identity. Other categories are
+`voter_identifier_not_found`, `voter_registry_mismatch`, and `voter_registry_unavailable`.
+
+After registration, **Did voter receive PIN?** accepts `yes` or `no`. The PIN appears
+only in `virtual_sms/<registered-phone>.txt`, never on the admin screen. The answer
+is audited without the voter ID; `no` is a warning and keeps the registration saved.
+This records the administrator's report, not independent proof of delivery.
+
+Tracing writes `logs/security.jsonl.YYYY-MM-DD` relative to the process working directory.
+Only fixed event names, severity, staff actor/election IDs and transport counts are
+exported. Voter authentication/request failures use `voter_security_counts` (day,
+category, total), with no per-voter trace. Operational retry counters and the admin
+participation list still contain identity; this is not cryptographic anonymity.
+SQLite audit records are authoritative. JSON tracing is a nonblocking diagnostic
+output; process crashes or an exhausted queue can lose trace messages.
+
+TLS keys: `cargo run --locked -- --init-tls` writes development certificates and
+keys under `tls-dev/` (`VOTING_TLS_DIR` overrides it). A remote client needs `ca.der`
+only. Generated private keys, actual voter databases and live logs are not in this ZIP.

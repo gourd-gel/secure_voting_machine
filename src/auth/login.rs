@@ -201,10 +201,6 @@ impl Auth {
             None,
             i64::from(login.attempts) + 1,
         )?;
-        // if now() >= login.expires {
-        //     audit(conn, None, Some(login.user_id), None, "otp_expired", 3)?;
-        //     return Err("OTP expired; log in again.".into());
-        // }
         if now() >= login.expires {
             if login.role == Role::Voter {
                 crate::security::voter_metric(conn, "otp_expired")?;
@@ -235,8 +231,6 @@ impl Auth {
             }
             return Err("Invalid OTP; three failures require a cooldown and a new login.".into());
         }
-        // reset_limit(conn, &scope)?;
-        // audit(conn, None, Some(login.user_id), None, "login_succeeded", 0)?;
         reset_limit(conn, &scope)?;
 
         if login.role != Role::Voter {

@@ -4,6 +4,7 @@ pub mod client;
 mod dispatch;
 mod monitor;
 mod protocol;
+mod registry;
 mod server;
 mod state;
 pub use client::{ApiClient, ClientAuth};

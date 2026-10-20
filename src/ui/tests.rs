@@ -107,7 +107,16 @@ fn ui_r_registers_voter_n_does_nothing_and_masks_password() {
             "ui@example.test",
         ],
     );
-    assert!(app.form.is_none(), "{}", app.notice);
+    assert!(
+        matches!(
+            app.form.as_ref().map(|f| f.purpose),
+            Some(FormPurpose::PinReceipt(_))
+        ),
+        "{}",
+        app.notice
+    );
+    fill(&mut app, &["yes"]);
+    assert!(app.form.is_none());
     assert_eq!(app.voters.len(), 1);
     assert_eq!(
         app.network.as_ref().unwrap().count("voter_pin_credentials"),
@@ -147,8 +156,14 @@ fn ui_voter_casts_once_and_district_announces_tie() {
     }
     app.handle_key(key(KeyCode::Char('s')));
     app.handle_key(key(KeyCode::Enter));
-    assert_eq!(app.screen, Screen::Elections);
+    assert_eq!(app.screen, Screen::Main);
+    assert!(app.session.is_none());
     assert!(app.elections.is_empty());
+    assert!(
+        std::fs::read_to_string(auth::login::mailbox_path(&f.root, &input(1).phone).unwrap())
+            .unwrap()
+            .contains("thank you for your vote!")
+    );
     assert_eq!(app.network.as_ref().unwrap().count("ballot_choices"), 6);
     app.logout();
     app.session = Some(

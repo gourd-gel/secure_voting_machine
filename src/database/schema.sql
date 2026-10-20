@@ -236,3 +236,17 @@ BEGIN
  WHERE active=1 AND role='district_official' AND NEW.event_type IN
  ('election_created','position_added','position_updated','position_deleted','candidate_added','candidate_updated','candidate_unlinked','candidate_linked','election_opened','election_closed','election_tallied','results_announced');
 END;
+
+-- Stored results and final timestamps cannot be rewritten by ordinary SQL updates.
+CREATE TRIGGER IF NOT EXISTS election_final_tally BEFORE UPDATE OF tallied_at,tallied_by ON elections
+WHEN OLD.tallied_at IS NOT NULL AND (NEW.tallied_at IS NOT OLD.tallied_at OR NEW.tallied_by IS NOT OLD.tallied_by)
+BEGIN SELECT RAISE(ABORT,'Tally is final'); END;
+CREATE TRIGGER IF NOT EXISTS election_final_announcement BEFORE UPDATE OF announced_at,announced_by ON elections
+WHEN OLD.announced_at IS NOT NULL AND (NEW.announced_at IS NOT OLD.announced_at OR NEW.announced_by IS NOT OLD.announced_by)
+BEGIN SELECT RAISE(ABORT,'Announcement is final'); END;
+CREATE TRIGGER IF NOT EXISTS candidate_results_no_update BEFORE UPDATE ON candidate_results BEGIN SELECT RAISE(ABORT,'Results are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS candidate_results_no_delete BEFORE DELETE ON candidate_results BEGIN SELECT RAISE(ABORT,'Results are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS candidate_results_no_late_insert BEFORE INSERT ON candidate_results WHEN EXISTS(SELECT 1 FROM elections WHERE election_id=NEW.election_id AND (status!='closed' OR tallied_at IS NOT NULL OR announced_at IS NOT NULL)) BEGIN SELECT RAISE(ABORT,'Results require a first tally'); END;
+CREATE TRIGGER IF NOT EXISTS party_results_no_update BEFORE UPDATE ON party_results BEGIN SELECT RAISE(ABORT,'Results are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS party_results_no_delete BEFORE DELETE ON party_results BEGIN SELECT RAISE(ABORT,'Results are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS party_results_no_late_insert BEFORE INSERT ON party_results WHEN EXISTS(SELECT 1 FROM elections WHERE election_id=NEW.election_id AND (status!='closed' OR tallied_at IS NOT NULL OR announced_at IS NOT NULL)) BEGIN SELECT RAISE(ABORT,'Results require a first tally'); END;

@@ -100,6 +100,28 @@ fn real_tls_full_election_and_role_privacy() {
     let mut pending = Some(ClientAuth.pin_login(&api, &pin).unwrap());
     let code = f.message("+15550000003", "Login OTP: ");
     let voter = ClientAuth.complete_otp(&api, &mut pending, &code).unwrap();
+    let errors_before = f.network.count("error_reports");
+    api.request::<Value>(
+        Role::Voter,
+        Some(voter.token.clone()),
+        "error",
+        json!(["voter-secret", "forged\nlog"]),
+    )
+    .unwrap();
+    assert_eq!(f.network.count("error_reports"), errors_before);
+    {
+        let state = f.network.state.lock().unwrap();
+        let n: i64 = state
+            .conn
+            .query_row(
+                "SELECT total FROM voter_security_counts WHERE event_type='client_error'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
     assert!(client::election::start(&mut api, &admin, e).is_err());
     client::election::start(&mut api, &official, e).unwrap();
     let positions = client::election::positions(&api, &voter, e).unwrap();
@@ -125,7 +147,7 @@ fn real_tls_full_election_and_role_privacy() {
     let log = client::election::audit_log(&api, &admin, e)
         .unwrap()
         .join("\n");
-    assert!(log.contains("voter_participated"));
+    assert!(!log.contains("voter_participated"));
     assert!(!log.contains(&pin));
     assert!(!log.contains("Hamberger"));
     assert_eq!(f.network.count("ballot_choices"), 3);
@@ -579,4 +601,125 @@ fn server_watchdog_closes_stalled_handler_and_counts_timeout() {
     stop.store(true, Ordering::Relaxed);
     worker.join().unwrap();
     assert_eq!(timeouts.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn registry_rejects_unknown_mismatched_and_underage_without_writes() {
+    let f = Fixture::new();
+    let mut api = f.network.client.clone();
+    let admin = f.login(Role::Admin);
+    let e = client::election::create(&mut api, &admin, "Eligibility").unwrap();
+    let mut input = VoterInput {
+        full_name: "Afia Demo".into(),
+        dob: "2000-01-02".into(),
+        nid: "DEMO-NY-001".into(),
+        phone: "+15551234567".into(),
+        email: "".into(),
+    };
+    for (id, dob) in [
+        ("NO-SUCH-ID", "2000-01-02"),
+        ("DEMO-NY-001", "2000-01-03"),
+        ("DEMO-NY-001", "2020-01-02"),
+    ] {
+        input.nid = id.into();
+        input.dob = dob.into();
+        assert!(client::voters::register(&mut api, &ClientAuth, &admin, e, &input).is_err());
+        assert_eq!(f.network.count("voter_pin_credentials"), 0);
+        assert_eq!(f.network.count("election_voters"), 0);
+    }
+    input.nid = "DEMO-NY-001".into();
+    input.dob = "2000-01-02".into();
+    client::voters::register(&mut api, &ClientAuth, &admin, e, &input).unwrap();
+    assert_eq!(f.network.count("voter_pin_credentials"), 1);
+}
+
+#[test]
+fn registry_phone_forgery_minor_and_injection_attempts_have_private_audits() {
+    let f = Fixture::new();
+    let mut api = f.network.client.clone();
+    let admin = f.login(Role::Admin);
+    let e = client::election::create(&mut api, &admin, "Registry attacks").unwrap();
+    for (nid, name, dob, phone, event) in [
+        (
+            "' OR 1=1 --",
+            "Afia Demo",
+            "2000-01-02",
+            "+15551234567",
+            "voter_identifier_not_found",
+        ),
+        (
+            "DEMO-NY-001",
+            "Afia Demo",
+            "2000-01-02",
+            "+15559999999",
+            "voter_registry_mismatch",
+        ),
+        (
+            "DEMO-NY-MINOR",
+            "Young Demo",
+            "2000-01-02",
+            "+15551234569",
+            "voter_not_eligible_underage",
+        ),
+        (
+            "DEMO-NY-001",
+            "Afia Demo",
+            "2020-01-02",
+            "+15551234567",
+            "voter_not_eligible_underage",
+        ),
+    ] {
+        let input = VoterInput {
+            nid: nid.into(),
+            full_name: name.into(),
+            dob: dob.into(),
+            phone: phone.into(),
+            email: "".into(),
+        };
+        assert!(client::voters::register(&mut api, &ClientAuth, &admin, e, &input).is_err());
+        assert_eq!(f.network.count("voter_pin_credentials"), 0);
+        let state = f.network.state.lock().unwrap();
+        let count:i64=state.conn.query_row("SELECT count(*) FROM audit_events WHERE event_type=?1 AND actor_user_id=1 AND subject_user_id IS NULL AND election_id=?2 AND severity=2",rusqlite::params![event,e],|r|r.get(0)).unwrap();
+        assert!(count > 0, "{event}");
+    }
+    assert!(!f.root.join("+15559999999.txt").exists());
+    let input = VoterInput {
+        nid: "DEMO-NY-001".into(),
+        full_name: "Afia Demo".into(),
+        dob: "2000-01-02".into(),
+        phone: "+15551234567".into(),
+        email: "".into(),
+    };
+    let voter = client::voters::register(&mut api, &ClientAuth, &admin, e, &input).unwrap();
+    for received in [false, true] {
+        client::voters::pin_receipt(&api, &admin, e, voter, received).unwrap();
+    }
+    let audit = client::election::audit_log(&api, &admin, e)
+        .unwrap()
+        .join("\n");
+    for secret in [&input.nid, &input.full_name, &input.phone, &input.dob] {
+        assert!(!audit.contains(secret));
+    }
+}
+
+#[test]
+fn unauthenticated_voter_failures_do_not_make_individual_request_logs() {
+    let f = Fixture::new();
+    let before = f.network.count("audit_events");
+    assert!(ClientAuth
+        .pin_login(&f.network.client, "00000000000000000000")
+        .is_err());
+    assert_eq!(f.network.count("audit_events"), before);
+    let state = f.network.state.lock().unwrap();
+    for event in ["pin_failed", "request_rejected"] {
+        let count: i64 = state
+            .conn
+            .query_row(
+                "SELECT total FROM voter_security_counts WHERE event_type=?1",
+                [event],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }

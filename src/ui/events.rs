@@ -282,7 +282,7 @@ impl App {
             vec![
                 ("Full name", input.full_name, false),
                 ("DOB YYYY-MM-DD", input.dob, false),
-                ("NID / passport ID", input.nid, false),
+                ("Government voter ID (demo)", input.nid, false),
                 ("Phone", input.phone, false),
                 ("Email (optional)", input.email, false),
             ],
@@ -308,7 +308,7 @@ impl App {
             KeyCode::Char('i' | 'I') => self.form(
                 FormPurpose::Enroll,
                 "Enroll an existing voter",
-                vec![("NID / passport ID", String::new(), false)],
+                vec![("Government voter ID (demo)", String::new(), false)],
             ),
             KeyCode::Char('d' | 'D') => {
                 if let Some(v) = self.voters.get(self.selected) {

@@ -62,7 +62,7 @@ pub fn password(value: &str, signup: bool) -> AppResult<()> {
     Ok(())
 }
 /// Validate identity fields and a real, non-future birth date; return normalized data.
-pub fn voter(input: &VoterInput) -> AppResult<VoterInput> {
+pub fn voter_fields(input: &VoterInput) -> AppResult<VoterInput> {
     let dob = NaiveDate::parse_from_str(input.dob.trim(), "%Y-%m-%d")
         .map_err(|_| "DOB must be YYYY-MM-DD and a real date.")?;
     if dob > Utc::now().date_naive() || dob < NaiveDate::from_ymd_opt(1900, 1, 1).unwrap() {
@@ -77,9 +77,39 @@ pub fn voter(input: &VoterInput) -> AppResult<VoterInput> {
     })
 }
 
+/// Require an adult after validating the supplied identity fields.
+pub fn voter(input: &VoterInput) -> AppResult<VoterInput> {
+    let input = voter_fields(input)?;
+    let dob = NaiveDate::parse_from_str(&input.dob, "%Y-%m-%d")?;
+    adult_on(
+        dob,
+        Utc::now()
+            .with_timezone(&chrono_tz::America::New_York)
+            .date_naive(),
+    )?;
+    Ok(input)
+}
+
+/// Calendar-age check, shared by enrollment and the final voting transaction.
+pub fn adult_on(dob: NaiveDate, today: NaiveDate) -> AppResult<()> {
+    if today.years_since(dob).unwrap_or(0) < 18 {
+        return Err("Voters must be at least 18 years old.".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn eighteenth_birthday_boundary_and_leap_day() {
+        let d = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        assert!(adult_on(d("2008-10-20"), d("2026-10-19")).is_err());
+        assert!(adult_on(d("2008-10-19"), d("2026-10-19")).is_ok());
+        assert!(adult_on(d("2008-10-18"), d("2026-10-19")).is_ok());
+        assert!(adult_on(d("2008-02-29"), d("2026-02-28")).is_err());
+        assert!(adult_on(d("2008-02-29"), d("2026-03-01")).is_ok());
+    }
     #[test]
     fn rejects_malformed_and_oversized_fields() {
         for bad in [

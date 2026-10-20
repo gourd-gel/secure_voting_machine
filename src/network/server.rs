@@ -22,9 +22,11 @@ impl Network {
         setup: bool,
     ) -> AppResult<Self> {
         let stop = Arc::new(AtomicBool::new(false));
+        let (registry, registry_worker) = registry::start(stop.clone())?;
         let setup_token = setup.then(|| Uuid::new_v4().to_string());
         let state = Arc::new(Mutex::new(State {
             conn,
+            registry,
             auth,
             pending: HashMap::new(),
             sessions: HashMap::new(),
@@ -82,17 +84,16 @@ impl Network {
                     state.conn.execute_batch("ROLLBACK")?;
                 }
                 if result.is_err() {
-                    crate::security::event(
-                        &state.conn,
-                        actor,
-                        if expired {
-                            "request_timeout"
-                        } else {
-                            "request_rejected"
-                        },
-                        None,
-                        0,
-                    )?;
+                    let kind = if expired {
+                        "request_timeout"
+                    } else {
+                        "request_rejected"
+                    };
+                    if ROLES[index] == Role::Voter {
+                        crate::security::voter_metric(&state.conn, kind)?;
+                    } else {
+                        crate::security::event(&state.conn, actor, kind, None, 0)?;
+                    }
                 }
                 // Delivery failures leave an outbox entry for the next request.
                 let _ = state.auth.flush_notifications(&state.conn);
@@ -100,14 +101,17 @@ impl Network {
             })();
             response(result)
         };
-        let mut workers = vec![listen(
-            db,
-            db_config,
-            stop.clone(),
-            rejected.clone(),
-            timeouts.clone(),
-            db_handler,
-        )?];
+        let mut workers = vec![
+            registry_worker,
+            listen(
+                db,
+                db_config,
+                stop.clone(),
+                rejected.clone(),
+                timeouts.clone(),
+                db_handler,
+            )?,
+        ];
         let mut addresses = Vec::new();
         for (i, listener) in gateways.into_iter().enumerate() {
             let role = ROLES[i];

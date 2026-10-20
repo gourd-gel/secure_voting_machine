@@ -5,3 +5,9 @@
 /virtual_sms/
 /tls-dev/
 /docs/api/
+
+/logs/
+*~
+\#*\#
+.\#*
+__pycache__/

@@ -155,3 +155,7 @@ pub fn audit_log(conn: &ApiClient, session: &Session, election: i64) -> AppResul
 pub fn flag_incident(conn: &ApiClient, session: &Session, election: i64) -> AppResult<()> {
     conn.call(session, "election.flag_incident", (election,))
 }
+
+pub fn audit_list(conn: &ApiClient, session: &Session) -> AppResult<Vec<Election>> {
+    conn.call(session, "election.audit_list", ())
+}

@@ -1,6 +1,6 @@
 [package]
 name = "secure_voting_machine"
-version = "0.2.2"
+version = "0.2.5"
 edition = "2021"
 license = "MIT"
 description = "Concepts of a secure voting machine"

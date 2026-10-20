@@ -38,19 +38,6 @@ pub fn check_deadline() -> AppResult<()> {
     }
 }
 /// Structured fields only: passwords, OTPs, request bodies and ballots never enter logs.
-// pub fn event(
-//     conn: &Connection,
-//     user: Option<i64>,
-//     kind: &str,
-//     scope: Option<&str>,
-//     attempts: i64,
-// ) -> AppResult<()> {
-//     conn.execute(
-//         "INSERT INTO security_events(user_id,event_type,scope,attempts) VALUES (?1,?2,?3,?4)",
-//         params![user, kind, scope, attempts],
-//     )?;
-//     crate::services::audit(conn, None, user, None, kind, 3)
-// }
 pub fn event(
     conn: &Connection,
     user: Option<i64>,
@@ -98,24 +85,6 @@ pub fn event(
 
     crate::services::audit(conn, None, user, None, kind, severity)?;
 
-    // Export only explicitly selected safe fields.
-    // Do not export the authentication scope.
-    if severity > 0 {
-        tracing::warn!(
-            target: "security",
-            event_type = kind,
-            actor_user_id = user.unwrap_or(-1),
-            "Staff or system security event"
-        );
-    } else {
-        tracing::info!(
-            target: "security",
-            event_type = kind,
-            actor_user_id = user.unwrap_or(-1),
-            "Staff or system authentication activity"
-        );
-    }
-
     Ok(())
 }
 pub fn voter_metric(conn: &Connection, kind: &str) -> AppResult<()> {
@@ -130,6 +99,8 @@ pub fn voter_metric(conn: &Connection, kind: &str) -> AppResult<()> {
             | "vote_rejected"
             | "client_error"
             | "authorization_denied"
+            | "request_rejected"
+            | "request_timeout"
     );
 
     if !allowed {

@@ -26,6 +26,12 @@ fn read_allowed(conn: &Connection, session: &Session, election: i64) -> AppResul
         Role::DistrictOfficial => conn.query_row("SELECT EXISTS(SELECT 1 FROM elections WHERE election_id=?1)",[election],|r|r.get(0))?,
         Role::Voter => conn.query_row("SELECT EXISTS(SELECT 1 FROM election_voters v JOIN elections e USING(election_id) WHERE v.election_id=?1 AND v.user_id=?2 AND e.status='open')",params![election,session.user_id()],|r|r.get(0))?,
     };
+    if session.role() == Role::Voter {
+        let voted: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM election_voters WHERE election_id=?1 AND user_id=?2 AND has_voted=1)", params![election,session.user_id()], |r|r.get(0))?;
+        if voted {
+            return Err("you already voted bruh".into());
+        }
+    }
     if !yes {
         return Err("Election is unavailable for this account.".into());
     }
@@ -33,20 +39,39 @@ fn read_allowed(conn: &Connection, session: &Session, election: i64) -> AppResul
 }
 /// Return records visible to the authenticated role and ownership scope.
 pub fn list(conn: &Connection, session: &Session) -> AppResult<Vec<Election>> {
+    election_list(conn, session, false)
+}
+/// Include cancelled elections when an owning administrator reviews history.
+pub fn audit_list(conn: &Connection, session: &Session) -> AppResult<Vec<Election>> {
+    require_role(conn, session, Role::Admin)?;
+    election_list(conn, session, true)
+}
+fn election_list(
+    conn: &Connection,
+    session: &Session,
+    include_cancelled: bool,
+) -> AppResult<Vec<Election>> {
     require_role(conn, session, session.role())?;
     let mut q=conn.prepare("SELECT e.election_id,e.name,e.status,e.announced_at IS NOT NULL FROM elections e
-        WHERE e.status<>'cancelled' AND (
+        WHERE (?3 OR e.status<>'cancelled') AND (
             (?1='admin' AND e.created_by=?2) OR ?1='district_official' OR
-            (?1='voter' AND e.status='open' AND EXISTS(SELECT 1 FROM election_voters v WHERE v.election_id=e.election_id AND v.user_id=?2 AND v.has_voted=0)))
+            (?1='voter' AND e.status='open' AND EXISTS(SELECT 1 FROM election_voters v WHERE v.election_id=e.election_id AND v.user_id=?2)))
         ORDER BY e.election_id DESC")?;
-    let rows = q.query_map(params![session.role().as_str(), session.user_id()], |r| {
-        Ok(Election {
-            id: r.get(0)?,
-            name: r.get(1)?,
-            status: r.get(2)?,
-            announced: r.get(3)?,
-        })
-    })?;
+    let rows = q.query_map(
+        params![
+            session.role().as_str(),
+            session.user_id(),
+            include_cancelled
+        ],
+        |r| {
+            Ok(Election {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                status: r.get(2)?,
+                announced: r.get(3)?,
+            })
+        },
+    )?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 /// Read one authorized election by its ID.
@@ -293,18 +318,8 @@ pub fn update_candidate(
     let party = text(party, "Political party")?;
     let tx = conn.transaction()?;
     owned(&tx, session, election, true)?;
-    // if tx.execute("UPDATE candidates SET full_name=?1,political_party=?2 WHERE election_id=?3 AND candidate_id=?4",params![name,party,election,candidate])? !=1 { return Err("Candidate not found in election.".into()); }
-    if tx.execute(
-        "UPDATE election_voters SET has_voted=1
-        WHERE election_id=?1 AND user_id=?2 AND has_voted=0",
-        params![election, session.user_id()],
-    )? != 1
-    {
-        tx.rollback()?;
-
-        crate::security::voter_metric(conn, "vote_rejected")?;
-
-        return Err("Already voted or not enrolled in this election.".into());
+    if tx.execute("UPDATE candidates SET full_name=?1,political_party=?2 WHERE election_id=?3 AND candidate_id=?4",params![name,party,election,candidate])? != 1 {
+        return Err("Candidate not found in election.".into());
     }
     finish_change(tx, session, election, None, "candidate_updated")
 }
@@ -344,7 +359,7 @@ pub fn start(conn: &mut Connection, session: &Session, election: i64) -> AppResu
     if n < 3 || bad {
         return Err("At least three positions and two candidates each are required.".into());
     }
-    if tx.execute("UPDATE elections SET status='open',opened_by=?1,started_at=CURRENT_TIMESTAMP,opened_at=CURRENT_TIMESTAMP WHERE election_id=?2 AND status='draft'",params![session.user_id(),election])? !=1 { return Err("Only a draft election can be opened.".into()); }
+    if tx.execute("UPDATE elections SET status='open',opened_by=?1,started_at=CURRENT_TIMESTAMP,opened_at=CURRENT_TIMESTAMP WHERE election_id=?2 AND status='draft' AND opened_at IS NULL AND closed_at IS NULL",params![session.user_id(),election])? !=1 { return Err("Only a draft election can be opened.".into()); }
     finish_change(tx, session, election, None, "election_opened")
 }
 /// Require a district official, close the open election and record its timestamp.
@@ -364,6 +379,21 @@ pub fn cast(
 ) -> AppResult<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     require_role(&tx, session, Role::Voter)?;
+    let dob: String = tx.query_row(
+        "SELECT dob FROM users WHERE id=?1",
+        [session.user_id()],
+        |r| r.get(0),
+    )?;
+    crate::validation::adult_on(
+        chrono::NaiveDate::parse_from_str(&dob, "%Y-%m-%d")?,
+        chrono::Utc::now()
+            .with_timezone(&chrono_tz::America::New_York)
+            .date_naive(),
+    )?;
+    let voted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM election_voters WHERE election_id=?1 AND user_id=?2 AND has_voted=1)", params![election,session.user_id()], |r|r.get(0))?;
+    if voted {
+        return Err("you already voted bruh".into());
+    }
     let open: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM elections WHERE election_id=?1 AND status='open')",
         [election],
@@ -388,10 +418,7 @@ pub fn cast(
         }
     }
     if tx.execute("UPDATE election_voters SET has_voted=1 WHERE election_id=?1 AND user_id=?2 AND has_voted=0",params![election,session.user_id()])? !=1 {
-        // Persist the failed attempt without persisting a partial ballot.
-        tx.rollback()?;
-        audit(conn,Some(election),Some(session.user_id()),None,"vote_rejected",3)?;
-        return Err("Already voted or not enrolled in this election.".into());
+        return Err("Not enrolled in this election.".into());
     }
     let ballot = Uuid::new_v4().to_string();
     tx.execute(
@@ -404,13 +431,8 @@ pub fn cast(
             params![election, ballot, position, candidate],
         )?;
     }
-    // finish_change(
-    //     tx,
-    //     session,
-    //     election,
-    //     Some(session.user_id()),
-    //     "voter_participated",
-    // )
+    // Queue delivery in the same transaction: no thank-you for a rolled-back vote.
+    tx.execute("INSERT INTO notification_outbox(phone,message) SELECT phone_number,'thank you for your vote!' FROM users WHERE id=?1", [session.user_id()])?;
     crate::security::check_deadline()?;
     tx.commit()?;
     Ok(())
@@ -424,15 +446,22 @@ pub fn tally(conn: &mut Connection, session: &Session, election: i64) -> AppResu
         [election],
         |r| r.get(0),
     )?;
-    if status != "closed" && status != "tallied" {
-        return Err("Close voting before tallying.".into());
+    let finalized: bool = tx.query_row("SELECT tallied_at IS NOT NULL OR announced_at IS NOT NULL FROM elections WHERE election_id=?1", [election], |r| r.get(0))?;
+    if status != "closed" || finalized {
+        tx.rollback()?;
+        audit(
+            conn,
+            Some(election),
+            Some(session.user_id()),
+            None,
+            "tally_rejected",
+            2,
+        )?;
+        return Err(
+            "Tally requires a closed, never-tallied election. Announced results are final.".into(),
+        );
     }
-    // Recomputing is idempotent and includes candidates with zero votes.
-    tx.execute(
-        "DELETE FROM candidate_results WHERE election_id=?1",
-        [election],
-    )?;
-    tx.execute("DELETE FROM party_results WHERE election_id=?1", [election])?;
+    // Persist once, including candidates with zero votes.
     tx.execute("INSERT INTO candidate_results SELECT pc.election_id,pc.position_id,pc.candidate_id,count(bc.ballot_id) FROM position_candidates pc LEFT JOIN ballot_choices bc ON bc.election_id=pc.election_id AND bc.position_id=pc.position_id AND bc.candidate_id=pc.candidate_id WHERE pc.election_id=?1 GROUP BY pc.election_id,pc.position_id,pc.candidate_id",[election])?;
     tx.execute("INSERT INTO party_results SELECT r.election_id,r.position_id,c.political_party,sum(r.votes) FROM candidate_results r JOIN candidates c ON c.candidate_id=r.candidate_id WHERE r.election_id=?1 GROUP BY r.election_id,r.position_id,c.political_party",[election])?;
     tx.execute("UPDATE elections SET status='tallied',tallied_by=?1,tallied_at=CURRENT_TIMESTAMP WHERE election_id=?2",params![session.user_id(),election])?;
@@ -442,7 +471,7 @@ pub fn tally(conn: &mut Connection, session: &Session, election: i64) -> AppResu
 pub fn announce(conn: &mut Connection, session: &Session, election: i64) -> AppResult<()> {
     let tx = conn.transaction()?;
     require_role(&tx, session, Role::DistrictOfficial)?;
-    if tx.execute("UPDATE elections SET announced_by=?1,announced_at=CURRENT_TIMESTAMP WHERE election_id=?2 AND status='tallied' AND announced_at IS NULL",params![session.user_id(),election])? !=1 { return Err("Tally first; results may already be announced.".into()); }
+    if tx.execute("UPDATE elections SET announced_by=?1,announced_at=CURRENT_TIMESTAMP WHERE election_id=?2 AND status='tallied' AND announced_at IS NULL",params![session.user_id(),election])? !=1 { tx.rollback()?; audit(conn, Some(election), Some(session.user_id()), None, "announcement_rejected", 2)?; return Err("Tally first; results may already be announced.".into()); }
     finish_change(tx, session, election, None, "results_announced")
 }
 /// Require a district official and return candidate vote totals without voter identities.
@@ -483,10 +512,10 @@ pub fn audit_log(conn: &Connection, session: &Session, election: i64) -> AppResu
     // Explicit allowlist of columns: never expose credential or ballot tables.
     let mut q=conn.prepare("SELECT a.occurred_at,a.event_type,COALESCE(u.full_name,'System'),COALESCE(s.full_name,''),a.severity
         FROM audit_events a LEFT JOIN users u ON u.id=a.actor_user_id LEFT JOIN users s ON s.id=a.subject_user_id
-        WHERE a.election_id=?1 OR (a.election_id IS NULL AND a.actor_user_id=?2) ORDER BY a.event_id DESC LIMIT 1000")?;
+        WHERE (a.election_id=?1 OR (a.election_id IS NULL AND a.actor_user_id=?2)) AND a.event_type NOT IN ('voter_participated','vote_rejected') ORDER BY a.event_id DESC LIMIT 1000")?;
     let rows = q.query_map(params![election, session.user_id()], |r| {
         Ok(format!(
-            "{} | {} | actor: {} | voter: {} | level {}",
+            "{} | {} | actor: {} | subject: {} | level {}",
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
